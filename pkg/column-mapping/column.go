@@ -20,7 +20,7 @@ import (
 	"sync"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb-tools/pkg/table-rule-selector"
+	selector "github.com/pingcap/tidb-tools/pkg/table-rule-selector"
 )
 
 var (
@@ -44,9 +44,10 @@ type Expr string
 
 // poor Expr
 const (
-	AddPrefix   Expr = "add prefix"
-	AddSuffix   Expr = "add suffix"
-	PartitionID Expr = "partition id"
+	AddPrefix      Expr = "add prefix"
+	AddSuffix      Expr = "add suffix"
+	PartitionID    Expr = "partition id"
+	PartitionMerge Expr = "partition merge"
 )
 
 // Exprs is some built-in expression for column mapping
@@ -67,7 +68,8 @@ var Exprs = map[Expr]func(*mappingInfo, []interface{}) ([]interface{}, error){
 	//         table = arguments[2] + table suffix
 	//  example: schema = schema_1 table = t_1  => arguments[1] = "schema_", arguments[2] = "t_"
 	//  if arguments[1]/arguments[2] == "", it means we don't use schemaID/tableID to compute partition ID
-	PartitionID: partitionID,
+	PartitionID:    partitionID,
+	PartitionMerge: partitionMerge,
 }
 
 // Rule is a rule to map column
@@ -112,6 +114,12 @@ func (r *Rule) Valid() error {
 		}
 	}
 
+	if r.Expression == PartitionMerge {
+		if len(r.Arguments) < 1 {
+			return errors.NotValidf("arguments %v for patition merge", r.Arguments)
+		}
+	}
+
 	return nil
 }
 
@@ -131,9 +139,10 @@ type mappingInfo struct {
 	targetPosition int
 	rule           *Rule
 
-	instanceID int64
-	schemaID   int64
-	tableID    int64
+	instanceID    int64
+	schemaID      int64
+	tableID       int64
+	splitPosition int
 }
 
 // Mapping maps column to something by rules
@@ -371,6 +380,17 @@ func (m *Mapping) queryColumnInfo(schema, table string, columns []string) (*mapp
 		}
 	}
 
+	// if expr is partition merge,compute schema and table ID
+	if rule.Expression == PartitionMerge {
+		columnName := info.rule.Arguments[0]
+		columnPosition := findColumnPosition(columns, columnName)
+
+		if columnPosition == -1 {
+			return nil, errors.Trace(errors.NotFoundf("target column %s", columnName))
+		}
+		info.splitPosition = columnPosition
+	}
+
 	m.cache.Lock()
 	m.cache.infos[tableName(schema, table)] = info
 	m.cache.Unlock()
@@ -426,6 +446,20 @@ func addSuffix(info *mappingInfo, vals []interface{}) ([]interface{}, error) {
 	rawByte = append(rawByte, suffix...)
 
 	vals[info.targetPosition] = string(rawByte)
+	return vals, nil
+}
+
+func partitionMerge(info *mappingInfo, vals []interface{}) ([]interface{}, error) {
+	instanceID, ok := strconv.Atoi(vals[info.splitPosition].(string))
+
+	if ok != nil {
+		return nil, errors.NotValidf("column %d value is not int, but %v",
+			info.splitPosition, vals[info.splitPosition])
+	}
+	instanceID = instanceID << 27
+	instanceID += vals[info.targetPosition].(int)
+	vals[info.targetPosition] = instanceID
+
 	return vals, nil
 }
 

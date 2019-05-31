@@ -1,0 +1,6 @@
+/bin
+*/*.iml
+*/.idea
+deps.sh
+go.sum
+go.mod
